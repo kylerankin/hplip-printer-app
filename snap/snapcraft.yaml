@@ -108,6 +108,7 @@ parts:
     source: https://github.com/openprinting/pappl-retrofit
     source-type: git
     # source-tag: '1.0b2'
+    source-commit: 49ad525a3715a57aae24c715ef0767b55ffb1991
     source-depth: 1
 # ext:updatesnap
 #   version-format:
