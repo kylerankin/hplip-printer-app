@@ -1,119 +1,272 @@
-name: Pack and Publish OCI Image to Docker Registry and GitHub Packages
+name: Publish immutable OCI release
+
+# Publishes an immutable, signed, multi-architecture GHCR index for the
+# application version encoded in rockcraft.yaml. Triggered by pushing a
+# version tag (v<version>) after a testing commit has been promoted to a
+# verified stable branch. No latest/edge/stable mutable OCI alias is ever
+# created: every tag, including the per-architecture tags, is written once.
 
 on:
   push:
-    branches:
-      - main
-      - master
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
-      workflow_choice:
-        description: "Choose Release Channel"
-        required: true
-        default: "edge"
-        type: choice
-        options:
-          - edge
-          - stable
-          - both
-  workflow_run:
-    workflows: ["Push new tag update to stable branch"]
-    types:
-      - completed
+      ref:
+        description: "Ref (tag or SHA) to publish, defaults to the pushed tag"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: oci-release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Credential-free by default. Only the release jobs below request write
+# permissions, and only after the version and build checks have passed.
+permissions: {}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/hplip-printer-app
 
 jobs:
-  build-rock:
-    runs-on: ubuntu-22.04
+  metadata:
+    # Read-only gate: the tag must match the version packaged in rockcraft.yaml
+    # before any image is built or published.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      revision: ${{ steps.version.outputs.revision }}
+      created: ${{ steps.version.outputs.created }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref || github.sha }}
+      - name: Resolve and validate the application version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Pinned yq so the extracted version is reproducible.
+          sudo curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64 -o /usr/bin/yq && sudo chmod +x /usr/bin/yq
+          # The tag to validate: a pushed tag name, or an explicit dispatch ref.
+          ref="${{ inputs.ref || github.ref_name }}"
+          tag="${ref#v}"
+          version="$(yq '.version' rockcraft.yaml)"
+          if [[ "$version" != "$tag" ]]; then
+            printf 'rockcraft.yaml version %s does not match tag v%s\n' "$version" "$tag" >&2
+            exit 1
+          fi
+          sha="${{ inputs.ref || github.sha }}"
+          {
+            echo "version=${version}"
+            echo "revision=$(git rev-parse "$sha")"
+            echo "created=$(git show -s --format=%cI "$sha")"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Pack with Rockcraft
+  build:
+    # Builds and publishes one immutable per-architecture image from the rock.
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Pack the rock for this architecture
         uses: canonical/craft-actions/rockcraft-pack@main
         id: rockcraft
+      - name: Install registry tools
+        run: sudo apt-get update && sudo apt-get install --yes fuse3 podman skopeo
+      - name: Load the rock and tag the local build image
+        run: |
+          set -euo pipefail
+          # Rockcraft emits one single-architecture .rock per built platform;
+          # select the slice matching this runner's architecture. Fall back to
+          # the only rock when the filename does not carry an arch code.
+          rock="$(ls *.rock 2>/dev/null | grep -E "${{ matrix.arch }}\.rock$" | head -1)"
+          if [[ -z "$rock" ]]; then
+            rock="$(ls *.rock | head -1)"
+          fi
+          printf 'Packing rock: %s\n' "$rock"
+          podman load -i "$rock"
+          loaded="$(podman images --format '{{.Repository}}:{{.Tag}}' | grep -v '^<none>:' | head -1)"
+          podman tag "$loaded" "${IMAGE}:build"
+      - name: Stamp OCI release labels
+        run: |
+          set -euo pipefail
+          container="$(podman create "${IMAGE}:build")"
+          trap 'podman rm "$container" >/dev/null 2>&1 || true' EXIT
+          podman commit --format oci \
+            --change "LABEL org.opencontainers.image.title=hplip-printer-app" \
+            --change "LABEL org.opencontainers.image.version=${VERSION}" \
+            --change "LABEL org.opencontainers.image.revision=$(git rev-parse HEAD)" \
+            --change "LABEL org.opencontainers.image.created=${{ needs.metadata.outputs.created }}" \
+            --change "LABEL org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --change "LABEL org.opencontainers.image.licenses=Apache-2.0" \
+            "$container" "${IMAGE}:build"
+      - name: Prove the architecture tag is absent, then publish it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          target="ghcr.io/${owner}/hplip-printer-app:${VERSION}-${{ matrix.arch }}"
+          echo "$GH_TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          if probe="$(skopeo inspect --creds "$GITHUB_ACTOR:$GH_TOKEN" "docker://${target}" 2>&1)"; then
+            printf 'Refusing to overwrite immutable architecture tag %s\n' "$target" >&2
+            exit 1
+          elif [[ "${probe,,}" != *"manifest unknown"* && "${probe,,}" != *"name unknown"* ]]; then
+            printf 'Could not prove architecture tag %s is absent: %s\n' "$target" "$probe" >&2
+            exit 1
+          fi
+          podman push "${IMAGE}:build" "docker://${target}"
 
-      - name: Upload Rock Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: cups-rock
-          path: ${{ steps.rockcraft.outputs.rock }}
-
-  publish-rock:
-    needs: build-rock
-    if: github.ref_name == 'main' || github.ref_name == 'master'
-    runs-on: ubuntu-latest
+  publish:
+    # Assembles the immutable multi-architecture index, signs it with cosign,
+    # attaches an SPDX SBOM, emits GitHub provenance, and verifies everything.
+    needs: [metadata, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.metadata.outputs.version }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download Rock Artifact
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          name: cups-rock
-
-      - name: Install Dependencies
-        run: |
-          sudo snap install rockcraft --classic
-          sudo snap install docker
-          sudo snap install yq
-
-      - name: Ensure Docker Daemon is Running
-        run: |
-          sudo systemctl start docker
-          sudo systemctl enable docker
-          sudo systemctl is-active --quiet docker || sudo systemctl start docker
-
-      # - name: Log in to Docker Hub
-      #   uses: docker/login-action@v3.2.0
-      #   with:
-      #     username: ${{ secrets.DOCKER_USERNAME }}
-      #     password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Log in to GitHub Packages
-        uses: docker/login-action@v3.2.0
+          persist-credentials: false
+      - name: Install registry tools
+        run: sudo apt-get update && sudo apt-get install --yes jq podman skopeo fuse3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and Push Docker Image (Edge & Latest Channel)
-        if: github.event.inputs.workflow_choice == 'edge' || github.event.inputs.workflow_choice == 'both' || github.event_name == 'push' || github.event_name == 'workflow_run'
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Create the immutable multi-architecture index
+        id: publish
         env:
-          USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          ORG: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          IMAGE="$(yq '.name' rockcraft.yaml)"
-          VERSION="$(yq '.version' rockcraft.yaml)"
-          ROCK="$(ls *.rock | tail -n 1)"
-          ORG_NAME=$(echo "${ORG}" | tr '[:upper:]' '[:lower:]')
-          sudo rockcraft.skopeo --insecure-policy copy oci-archive:"${ROCK}" docker-daemon:"${ORG_NAME}/${IMAGE}:${VERSION}-edge"
-          # Push to Docker Hub
-          # docker tag ${ORG_NAME}/${IMAGE}:${VERSION}-edge ${USERNAME}:${VERSION}-edge
-          # docker push ${USERNAME}/${IMAGE}:${VERSION}-edge
-          # docker tag ${USERNAME}/${IMAGE}:${VERSION}-edge ${USERNAME}/${IMAGE}:latest
-          # docker push ${USERNAME}/${IMAGE}:latest
-          # Push to GitHub Packages
-          GITHUB_IMAGE="ghcr.io/${ORG_NAME}/${IMAGE}"
-          docker tag ${ORG_NAME}/${IMAGE}:${VERSION}-edge ${GITHUB_IMAGE}:${VERSION}-edge
-          docker push ${GITHUB_IMAGE}:${VERSION}-edge
-          docker tag ${GITHUB_IMAGE}:${VERSION}-edge ${GITHUB_IMAGE}:latest
-          docker push ${GITHUB_IMAGE}:latest
-
-      - name: Build and Push Docker Image (Stable Channel)
-        if: github.event.inputs.workflow_choice == 'stable' || github.event.inputs.workflow_choice == 'both'
+          set -euo pipefail
+          target="${IMAGE}:${VERSION}"
+          authfile="$HOME/.docker/config.json"
+          if probe="$(skopeo inspect --authfile "$authfile" "docker://${target}" 2>&1)"; then
+            printf 'Refusing to overwrite immutable release tag %s\n' "$target" >&2
+            exit 1
+          elif [[ "${probe,,}" != *"manifest unknown"* && "${probe,,}" != *"name unknown"* ]]; then
+            printf 'Could not prove release tag %s is absent: %s\n' "$target" "$probe" >&2
+            exit 1
+          fi
+          # Verify each architecture slice is present and has the right arch.
+          for pair in "amd64:x86_64" "arm64:aarch64"; do
+            arch="${pair%%:*}"
+            src_arch="${pair##*:}"
+            source="${IMAGE}:${VERSION}-${src_arch}"
+            actual="$(skopeo inspect --authfile "$authfile" "docker://${source}" | jq -r .Architecture)"
+            [[ "$actual" == "$arch" ]]
+          done
+          docker buildx imagetools create \
+            --tag "$target" \
+            --annotation "index:org.opencontainers.image.title=hplip-printer-app" \
+            --annotation "index:org.opencontainers.image.description=HPLIP Printer Application built for Bluefin" \
+            --annotation "index:org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --annotation "index:org.opencontainers.image.licenses=Apache-2.0" \
+            --annotation "index:org.opencontainers.image.version=${VERSION}" \
+            --annotation "index:org.opencontainers.image.revision=${{ needs.metadata.outputs.revision }}" \
+            --annotation "index:org.opencontainers.image.created=${{ needs.metadata.outputs.created }}" \
+            "${IMAGE}:${VERSION}-x86_64" \
+            "${IMAGE}:${VERSION}-aarch64"
+          digest="$(skopeo inspect --authfile "$authfile" "docker://${target}" | jq -r .Digest)"
+          [[ "$digest" == sha256:* ]]
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+      - name: Install cosign and ORAS
+        uses: sigstore/cosign-installer@v3
+      - uses: oras-project/setup-oras@v2
+      - name: Generate SPDX SBOM
+        uses: taiki-e/install-action@v2
+        with:
+          tool: syft
+      - name: Generate SPDX SBOM from the published index
+        run: syft "${IMAGE}:${VERSION}" -o spdx-json > hplip-printer-app.spdx.json
+      - name: Sign image and attach signed SBOM
+        id: evidence
         env:
-          USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          ORG: ${{ github.repository_owner }}
+          IMAGE: ${{ steps.publish.outputs.image }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
         run: |
-            IMAGE="$(yq '.name' rockcraft.yaml)"
-            VERSION="$(yq '.version' rockcraft.yaml)"
-            ROCK="$(ls *.rock | tail -n 1)"
-            ORG_NAME=$(echo "${ORG}" | tr '[:upper:]' '[:lower:]')
-            sudo rockcraft.skopeo --insecure-policy copy oci-archive:"${ROCK}" docker-daemon:"${ORG_NAME}/${IMAGE}:${VERSION}-stable"
-            # Push to Docker Hub
-            # docker tag ${ORG_NAME}/${IMAGE}:${VERSION}-stable ${USERNAME}:${VERSION}-stable
-            # docker push ${USERNAME}/${IMAGE}:${VERSION}-stable
-            # Push to GitHub Packages
-            GITHUB_IMAGE="ghcr.io/${ORG_NAME}/${IMAGE}"
-            docker tag ${ORG_NAME}/${IMAGE}:${VERSION}-stable ${GITHUB_IMAGE}:${VERSION}-stable
-            docker push ${GITHUB_IMAGE}:${VERSION}-stable
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+          sbom_digest="$(oras attach --format json --no-tty \
+            --artifact-type application/vnd.spdx+json \
+            --annotation org.opencontainers.image.title=hplip-printer-app-sbom \
+            "${IMAGE}@${DIGEST}" \
+            hplip-printer-app.spdx.json:application/spdx+json | jq -r .digest)"
+          [[ "$sbom_digest" == sha256:* ]]
+          cosign sign --yes "${IMAGE}@${sbom_digest}"
+          echo "sbom-digest=${sbom_digest}" >> "$GITHUB_OUTPUT"
+      - name: Generate GitHub provenance attestation
+        uses: actions/attest@v2
+        with:
+          subject-name: ${{ steps.publish.outputs.image }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          subject-type: docker-reference
+          push-to-registry: true
+      - name: Verify the published release evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ steps.publish.outputs.image }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+          SBOM_DIGEST: ${{ steps.evidence.outputs.sbom-digest }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          REVISION: ${{ needs.metadata.outputs.revision }}
+          CREATED: ${{ needs.metadata.outputs.created }}
+        run: |
+          set -euo pipefail
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/registry-actions.yml@refs/tags/v${VERSION}"
+          cosign verify \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${IMAGE}@${DIGEST}"
+          cosign verify \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${IMAGE}@${SBOM_DIGEST}"
+          gh attestation verify "oci://${IMAGE}@${DIGEST}" --repo "$GITHUB_REPOSITORY"
+          oras discover --format json "${IMAGE}@${DIGEST}" |
+            jq -e --arg digest "$SBOM_DIGEST" '.referrers[] | select(.digest == $digest and .artifactType == "application/vnd.spdx+json")'
+          raw="$(skopeo inspect --raw "docker://${IMAGE}@${DIGEST}")"
+          [[ "$(jq -r '[.manifests[].platform.architecture] | sort | join(" ")' <<< "$raw")" == "amd64 arm64" ]]
+          jq -e \
+            --arg version "$VERSION" \
+            --arg revision "$REVISION" \
+            --arg created "$CREATED" \
+            --arg source_url "https://github.com/${GITHUB_REPOSITORY}" \
+            '.annotations["org.opencontainers.image.title"] == "hplip-printer-app" and
+             .annotations["org.opencontainers.image.source"] == $source_url and
+             .annotations["org.opencontainers.image.version"] == $version and
+             .annotations["org.opencontainers.image.revision"] == $revision and
+             .annotations["org.opencontainers.image.created"] == $created and
+             .annotations["org.opencontainers.image.licenses"] == "Apache-2.0"' <<< "$raw"

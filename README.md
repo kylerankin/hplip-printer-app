@@ -261,9 +261,11 @@ file for configuring SNMP network printer discovery.
 You can pull the `hplip-printer-app` Docker image from either the GitHub Container Registry or Docker Hub.
 
 **From GitHub Container Registry** <br>
-To pull the image from the GitHub Container Registry, run the following command:
+Releases are published as immutable, signed, multi-architecture images tagged with the application version (for example `v3.22.10-24`). No mutable `latest`/`edge`/`stable` alias is ever published, so pin the exact version you want to run.
+
+To pull a released image from the GitHub Container Registry, run the following command:
 ```sh
-  sudo docker pull ghcr.io/openprinting/hplip-printer-app:latest
+  sudo docker pull ghcr.io/projectbluefin/hplip-printer-app:v3.22.10-24
 ```
 
 Create a Docker volume:
@@ -280,7 +282,7 @@ To run the container after pulling the image from the GitHub Container Registry,
       -v hplip-printer-app:/var/lib/hplip-printer-app \
       -v /dev/bus/usb:/dev/bus/usb:ro \
       --device-cgroup-rule='c 189:* rmw' \
-      ghcr.io/openprinting/hplip-printer-app:latest
+      ghcr.io/projectbluefin/hplip-printer-app:v3.22.10-24
 ```
 
 **From Docker Hub** <br>
