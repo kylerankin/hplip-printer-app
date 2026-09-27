@@ -11,10 +11,15 @@ on:
       - files/**
       - Makefile
       - hplip-printer-app.c
+      - hplip-plugin-verify.c
+      - hplip-plugin-verify.h
+      - hplip-download-policy.c
+      - hplip-download-policy.h
       - hplip-printer-app.1
       - hplip-printer-app.service
       - testpage.ps
       - HP
+      - scripts/**
       - VERSION
       - ci/buildstream.conf
       - .github/workflows/bst-cache.yml
@@ -57,7 +62,7 @@ jobs:
         id: bst-key
         env:
           ARCH: ${{ matrix.arch }}
-          INPUTS_HASH: ${{ hashFiles('project.conf', 'elements/**', 'include/**', 'patches/**', 'files/**', 'Makefile', 'hplip-printer-app.c', 'hplip-printer-app.1', 'hplip-printer-app.service', 'testpage.ps', 'HP', 'VERSION') }}
+          INPUTS_HASH: ${{ hashFiles('project.conf', 'elements/**', 'include/**', 'patches/**', 'files/**', 'Makefile', 'hplip-printer-app.c', 'hplip-plugin-verify.c', 'hplip-plugin-verify.h', 'hplip-download-policy.c', 'hplip-download-policy.h', 'hplip-printer-app.1', 'hplip-printer-app.service', 'testpage.ps', 'HP', 'scripts/hplip-plugin-state.sh', 'VERSION') }}
         run: echo "prefix=bst-v1-${ARCH}-${INPUTS_HASH}-" >> "$GITHUB_OUTPUT"
       - name: Restore BuildStream cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
