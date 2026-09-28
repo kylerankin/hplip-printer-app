@@ -1,0 +1,53 @@
+name: Plugin architecture matching
+
+# The HP plugin install path symlinks the vendor archive's
+# "<component>-<ARCH>.so" libraries to "<component>.so" for the build
+# architecture. This runs the unit tests which check that matching works on
+# both release architectures (x86_64 for the amd64 release, arm64 for the
+# arm64 release) and rejects mismatched-arch libraries. The application itself
+# is compiled against the shared printing base by the merge-queue image build
+# (fsdk-ci.yml, just verify).
+
+on:
+  push:
+    branches:
+      - testing
+      - stable
+    paths:
+      - hplip-plugin-arch.c
+      - hplip-plugin-arch.h
+      - hplip-printer-app.c
+      - Makefile
+      - tests/**
+      - .github/workflows/plugin-arch.yml
+  pull_request:
+    branches:
+      - testing
+      - stable
+    paths:
+      - hplip-plugin-arch.c
+      - hplip-plugin-arch.h
+      - hplip-printer-app.c
+      - Makefile
+      - tests/**
+      - .github/workflows/plugin-arch.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plugin-arch:
+    name: Arch-matching unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lint the test script
+        run: shellcheck -s sh tests/run-plugin-arch-tests.sh
+
+      - name: Test the plugin architecture matching on both release arches
+        run: tests/run-plugin-arch-tests.sh

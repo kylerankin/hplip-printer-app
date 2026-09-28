@@ -26,6 +26,7 @@
 #include <pthread.h>
 #include <fcntl.h>
 #include "hplip-plugin-verify.h"
+#include "hplip-plugin-arch.h"
 
 #include "hplip-download-policy.h"
 
@@ -978,61 +979,30 @@ hplip_install_plugin(pappl_system_t *system, const char *plugin_dir)
 
 #if defined(SNAP) || HPLIP_OCI
 
-  int len;
-  char buf1[1024], buf2[1024];
-  DIR *d;
-  struct dirent *entry;
+  char buf2[1024];
   struct stat st;
-  char *p, *version = NULL;
-  int arch_matches = 0;
+  char *version = NULL;
+  int arch_matches;
 
-  // Open the directory with the files of the uncompressed plugin
-  len = snprintf(buf1, sizeof(buf1), "%s/plugin_tmp", plugin_dir);
-  if ((d = opendir(buf1)) == NULL)
-  {
-    papplLog(system, PAPPL_LOGLEVEL_ERROR,
-	     "Could not open the directory %s: %s", buf1, strerror(errno));
-    goto out;
-  }
-
-  // Go through all the files of the plugin, and for the dynamic link
-  // libraries (*.so files) link the ones of our system's architecture.
   // HPLIP's vendor archive tags files as "<component>-<ARCH>.so[.version]"
   // where ARCH is one of "x86_32", "x86_64", "arm32", "arm64" (the same
   // labels this Printer Application uses, see the ARCH macro above), not
-  // OCI/Debian-style "amd64"/"arm64" triplets. If a vendor bundle ever
-  // uses different aliases for our architecture, or simply lacks any
-  // files for it (this has historically been true for some
-  // ARM-only-partial vendor bundles), zero symlinks get created and the
-  // plugin silently ends up non-functional; make that failure loud
-  // instead of quietly continuing as if the plugin were fully installed.
-  papplLog(system, PAPPL_LOGLEVEL_DEBUG,
-	   "Adding symlinks for dynamic link libraries of the %s architecture in %s", ARCH, buf1);
-  buf1[len] = '/';
-  len ++;
-  while (entry = readdir(d))
+  // OCI/Debian-style "amd64"/"arm64" triplets. The matching and symlink
+  // staging live in hplip-plugin-arch.c so both release architectures are
+  // unit-tested (tests/run-plugin-arch-tests.sh) without a download or an
+  // image. A -1 here is a real staging error; a 0 means the vendor bundle
+  // has no files for this architecture (historically some ARM-only-partial
+  // bundles), which the check below turns into a loud refusal rather than a
+  // silently broken plugin.
+  arch_matches = hplip_stage_plugin_libs(plugin_dir, ARCH);
+  if (arch_matches < 0)
   {
-    if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
-      continue;
-    if ((p = strstr(entry->d_name, ARCH)) != NULL &&
-	p > entry->d_name && *(p - 1) == '-' &&
-	strncmp(p + strlen(ARCH), ".so", 3) == 0)
-    {
-      memmove(buf1 + len, entry->d_name, (p - entry->d_name) - 1);
-      memmove(buf1 + len + (p - entry->d_name) - 1, p + strlen(ARCH),
-	      strlen(p + strlen(ARCH)) + 1);
-      if (symlink(entry->d_name, buf1) != 0)
-      {
-	papplLog(system, PAPPL_LOGLEVEL_ERROR,
-		 "Could not create symboiic link %s to %s: %s",
-		 buf1, entry->d_name, strerror(errno));
-	closedir(d);
-	goto out;
-      }
-      arch_matches ++;
-    }
+    int save_errno = errno;
+    papplLog(system, PAPPL_LOGLEVEL_ERROR,
+	     "Could not stage the plugin libraries in %s/plugin_tmp: %s",
+	     plugin_dir, strerror(save_errno));
+    goto out;
   }
-  closedir(d);
 
   if (arch_matches == 0)
   {

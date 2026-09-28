@@ -77,7 +77,7 @@ LIBS		+=	`pkg-config --libs pappl` `cups-config --image --libs` `pkg-config --li
 
 
 # Targets...
-OBJS		=	hplip-printer-app.o hplip-plugin-verify.o hplip-download-policy.o
+OBJS		=	hplip-printer-app.o hplip-plugin-verify.o hplip-download-policy.o hplip-plugin-arch.o
 TARGETS		=	hplip-printer-app
 
 
@@ -126,4 +126,4 @@ install:	$(TARGETS)
 hplip-printer-app:	$(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 
-$(OBJS):	Makefile hplip-plugin-verify.h hplip-download-policy.h
+$(OBJS):	Makefile hplip-plugin-verify.h hplip-download-policy.h hplip-plugin-arch.h
