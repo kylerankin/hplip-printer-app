@@ -8,7 +8,9 @@
 #include "hplip-plugin-arch.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -54,7 +56,11 @@ hplip_stage_plugin_libs(const char *plugin_dir, const char *arch)
 	      strlen(p + strlen(arch)) + 1);
       if (symlink(entry->d_name, path) != 0)
       {
+        // Keep symlink()'s errno for the caller's log, not closedir()'s.
+        int saved_errno = errno;
+
         closedir(d);
+        errno = saved_errno;
         return -1;
       }
       matches ++;
