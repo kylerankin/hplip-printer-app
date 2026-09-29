@@ -18,7 +18,7 @@
 
 set -u
 
-# shellcheck disable=SC2317  # invoked by the trap below
+# shellcheck disable=SC2317,SC2329  # invoked by the trap below
 cleanup() {
     rm -rf "$tmpdir"
     # The test program stages its symlinks under /tmp/hplip-arch-*.
