@@ -8,6 +8,8 @@ depends:
   - printer-app/python3-distro.bst
   - printer-app/runtime-files.bst
   - fsdk-containers.bst:printing/base.bst
+  # Required by the slim-printing gate (printing-base.md consumer contract rule 8).
+  - fsdk-containers.bst:printing/entrypoint-common.bst
   - fsdk-containers.bst:freedesktop-sdk.bst:public-stacks/runtime-gnu.bst
   - fsdk-containers.bst:freedesktop-sdk.bst:components/ca-certificates.bst
   - fsdk-containers.bst:freedesktop-sdk.bst:components/catatonit.bst

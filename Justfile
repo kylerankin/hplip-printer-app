@@ -44,6 +44,7 @@ check-entrypoint:
     done
     python3 -m unittest discover -s tests -p 'test_renovate.py'
     python3 tests/test_python_install_pins.py
+    python3 tests/test_entrypoint_common.py
     python3 tests/test-plugin-page.py
 
 fetch:
